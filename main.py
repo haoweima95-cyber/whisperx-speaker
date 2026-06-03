@@ -169,11 +169,11 @@ ffmpeg 用于从视频中提取音频，需要单独安装：
 # ============================================================
 
 def format_time_txt(seconds):
-    """TXT 格式：HH:MM:SS"""
+    """TXT 格式：HH:MM:SS.ms（精确到百分秒）"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
 
 
 def format_time_srt(seconds):
