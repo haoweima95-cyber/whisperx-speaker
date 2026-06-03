@@ -226,15 +226,20 @@ def extract_audio(video_path, output_dir=None):
 # 语音转录（faster-whisper）
 # ============================================================
 
-def transcribe(audio_path, model_size="base", device="cpu"):
-    """使用 faster-whisper 进行语音转录"""
+def load_whisper_model(model_size="base", device="cpu"):
+    """加载 faster-whisper 模型（一次性加载，可跨视频复用）"""
+    print(f"📦 加载 Whisper 模型: {model_size} (device={device})")
+    from faster_whisper import WhisperModel
+    compute_type = "int8" if device == "cpu" else "float16"
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
+def transcribe(audio_path, model_size="base", device="cpu", model=None):
+    """使用 faster-whisper 进行语音转录。传入 model 参数可复用已加载的模型。"""
     print("📝 正在进行语音转录...")
 
-    from faster_whisper import WhisperModel
-
-    compute_type = "int8" if device == "cpu" else "float16"
-
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    if model is None:
+        model = load_whisper_model(model_size, device)
 
     try:
         raw_segments, info = model.transcribe(
@@ -261,6 +266,70 @@ def transcribe(audio_path, model_size="base", device="cpu"):
 # 上下文纠错（基于文件名关键词 + 拼音相似度）
 # ============================================================
 
+def extract_title_from_filename(video_path):
+    """
+    从视频文件名中提取干净的中文标题。
+
+    处理逻辑（按优先级）：
+    1. 递归去除所有括号内容（中英文括号均支持）
+    2. 去除 @mention（含其后可能的括号内容）
+    3. 去除末尾文件 hash（下划线 + 16+ 位十六进制）
+    4. 去除尾部省略号
+    5. 返回最长的中文连续片段作为标题
+
+    示例：
+        输入: "(路飞直播回放（切片）)这个世界的真相，普通人都不懂的生存规则 @自己造船的路飞（装逼中） @自..._b125dc33e374625b92ca9899ad46f268"
+        输出: "这个世界的真相，普通人都不懂的生存规则"
+    """
+    import re
+
+    text = Path(video_path).stem
+
+    # Step 1: 递归去除括号内容（支持嵌套）
+    def remove_parens(s, left, right):
+        while left in s:
+            new_s = re.sub(r'\%s[^%s%s]*\%s' % (left, left, right, right), '', s)
+            if new_s == s:
+                break
+            s = new_s
+        return s
+
+    text = remove_parens(text, '(', ')')   # 西文括号
+    text = remove_parens(text, '（', '）') # 中文括号
+    text = remove_parens(text, '【', '】') # 方头括号
+    text = remove_parens(text, '「', '」') # 引号括号
+
+    # Step 2: 去除 @mention（包含 @xxx 和 @xxx（...））
+    text = re.sub(r'@\S+', ' ', text)
+
+    # Step 3: 去除末尾文件 hash（下划线 + 16 位以上十六进制字符）
+    text = re.sub(r'_[a-fA-F0-9]{16,}$', '', text)
+
+    # Step 4: 去除尾部省略号
+    text = re.sub(r'\.{3,}$', '', text)
+    text = re.sub(r'…+$', '', text)
+
+    # Step 5: 去除残留的英文单词、数字和特殊符号
+    text = re.sub(r'[a-zA-Z0-9@＠#＃\-\—]+', ' ', text)
+
+    # Step 6: 清理空白
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # Step 7: 提取最长的中文连续片段
+    chinese_parts = re.findall(r'[一-鿿，。！？、；：""''《》　\.,!?;:]+', text)
+    if chinese_parts:
+        title = max(chinese_parts, key=len).strip()
+        # 清理首尾标点
+        title = re.sub(r'^[\s,，。！？、；：\.\!\?\;\:]+', '', title)
+        title = re.sub(r'[\s,，。！？、；：\.\!\?\;\:]+$', '', title)
+        if title:
+            return title
+
+    # 兜底：返回清理后的文本或原始文件名
+    fallback = text.strip().rstrip('._-')
+    return fallback if fallback else Path(video_path).stem
+
+
 def extract_keywords_from_filename(video_path):
     """
     从视频文件名中提取有意义的中文关键词（>= 2 个汉字）
@@ -268,19 +337,12 @@ def extract_keywords_from_filename(video_path):
     """
     import re
 
-    filename = Path(video_path).stem
+    # 复用 extract_title_from_filename 的清理结果
+    title = extract_title_from_filename(video_path)
 
-    # 移除常见的噪音标记
-    # 去掉括号及其内容、下划线、数字、英文、特殊符号
-    cleaned = re.sub(r'[\(（\[【].*?[\)）\]】]', ' ', filename)  # 括号内容
-    cleaned = re.sub(r'_[a-f0-9]{8,}', ' ', cleaned)            # 文件hash
-    cleaned = re.sub(r'[a-zA-Z0-9]+', ' ', cleaned)              # 英文数字
-    cleaned = re.sub(r'[#＃@＠\-\—\.\,\，\。\!\！\?\？]', ' ', cleaned)  # 标点
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-
-    # 提取连续中文片段
+    # 提取连续中文片段作为关键词
     keywords = []
-    for phrase in re.findall(r'[一-鿿]{2,}', cleaned):
+    for phrase in re.findall(r'[一-鿿]{2,}', title):
         phrase = phrase.strip()
         if len(phrase) >= 2:
             keywords.append(phrase)
@@ -423,17 +485,36 @@ def _pinyin_similarity(py1, py2):
 # 说话人分离（pyannote.audio）
 # ============================================================
 
-def diarize(audio_path, hf_token, device="cpu"):
-    """使用 pyannote.audio 进行说话人分离"""
+def load_pyannote_pipeline(hf_token, device="cpu"):
+    """加载 pyannote 说话人分离管道（一次性加载，可跨视频复用）"""
+    if not hf_token:
+        raise ValueError("需要 HuggingFace token 来加载说话人分离模型")
+
+    print(f"📦 加载 pyannote 说话人分离模型...")
+    from pyannote.audio import Pipeline
+
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        token=hf_token,
+    )
+
+    import torch
+    if device != "cpu" and torch.cuda.is_available():
+        pipeline = pipeline.to(torch.device(device))
+    print("  ✅ 说话人分离模型就绪")
+    return pipeline
+
+
+def diarize(audio_path, hf_token, device="cpu", pipeline=None):
+    """使用 pyannote.audio 进行说话人分离。传入 pipeline 参数可复用已加载的管道。"""
     print("👥 正在识别不同发言人...")
 
-    if not hf_token:
+    if not hf_token and pipeline is None:
         raise ValueError("需要 HuggingFace token")  # 调用方会处理
 
     import torch
     import numpy as np
     from scipy.io import wavfile
-    from pyannote.audio import Pipeline
 
     # scipy 读取 WAV（绕过 torchcodec）
     sample_rate, waveform_np = wavfile.read(str(audio_path))
@@ -452,13 +533,8 @@ def diarize(audio_path, hf_token, device="cpu"):
         waveform = T.Resample(orig_freq=sample_rate, new_freq=16000)(waveform)
         sample_rate = 16000
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        token=hf_token,
-    )
-
-    if device != "cpu" and torch.cuda.is_available():
-        pipeline = pipeline.to(torch.device(device))
+    if pipeline is None:
+        pipeline = load_pyannote_pipeline(hf_token, device)
 
     audio_input = {"waveform": waveform, "sample_rate": sample_rate}
     diarization = pipeline(audio_input)
@@ -518,8 +594,11 @@ def merge_segments(transcript_segments, diarization):
 # 输出格式化
 # ============================================================
 
-def save_txt(merged_segments, output_path):
+def save_txt(merged_segments, output_path, title=None):
+    """保存 TXT 格式，第一行为视频标题（如果提供）"""
     with open(output_path, "w", encoding="utf-8") as f:
+        if title:
+            f.write(f"{title}\n")
         for start, end, speaker, text in merged_segments:
             f.write(f"[{format_time_txt(start)} - {format_time_txt(end)}] {speaker}: {text}\n")
     return output_path
@@ -534,8 +613,9 @@ def save_srt(merged_segments, output_path):
     return output_path
 
 
-def save_json_output(merged_segments, output_path):
+def save_json_output(merged_segments, output_path, title=None):
     data = {
+        "title": title or "",
         "segments": [
             {"start": s, "end": e, "speaker": sp, "text": t}
             for s, e, sp, t in merged_segments
@@ -618,13 +698,17 @@ def process_video(video_path, output_format="txt", model_size="base", device="cp
     # 8. 清理临时文件
     cleanup_temp(wav_path)
 
-    # 9. 输出文件
+    # 8b. 从文件名提取干净标题
     video_path = Path(video_path)
+    title = extract_title_from_filename(video_path)
+    print(f"📛 提取标题: {title}")
+
+    # 9. 输出文件
     output_files = []
     speakers = set(s for _, _, s, _ in merged)
 
     if output_format in ["txt", "all"]:
-        f = save_txt(merged, video_path.with_suffix(".speaker.txt"))
+        f = save_txt(merged, video_path.with_suffix(".speaker.txt"), title=title)
         print(f"✅ TXT: {f}")
         output_files.append(str(f))
 
@@ -634,7 +718,7 @@ def process_video(video_path, output_format="txt", model_size="base", device="cp
         output_files.append(str(f))
 
     if output_format in ["json", "all"]:
-        f = save_json_output(merged, video_path.with_suffix(".speaker.json"))
+        f = save_json_output(merged, video_path.with_suffix(".speaker.json"), title=title)
         print(f"✅ JSON: {f}")
         output_files.append(str(f))
 
