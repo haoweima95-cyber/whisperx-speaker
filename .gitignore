@@ -1,0 +1,18 @@
+# 敏感文件 - 用户的 HuggingFace token
+.env
+HF_TOKEN
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 临时文件
+*.wav
+*.log
+
+# IDE
+.vscode/
+.idea/

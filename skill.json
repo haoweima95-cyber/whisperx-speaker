@@ -1,0 +1,100 @@
+{
+  "name": "whisperx-speaker",
+  "description": "提取视频中的语音文字、时间戳和说话人信息。使用 faster-whisper + pyannote.audio。触发方式：/whisperx、/识别发言人",
+  "version": "1.0.0",
+  "author": "Haowei",
+  "commands": [
+    {
+      "name": "whisperx",
+      "description": "提取视频中的语音文字、时间戳和说话人信息",
+      "handler": "main.py",
+      "arguments": [
+        {
+          "name": "video",
+          "description": "视频文件路径",
+          "type": "file",
+          "required": true
+        },
+        {
+          "name": "format",
+          "description": "输出格式：txt（默认）、srt、json、all",
+          "type": "string",
+          "required": false,
+          "default": "txt",
+          "options": ["txt", "srt", "json", "all"]
+        },
+        {
+          "name": "model",
+          "description": "Whisper 模型：tiny, base, small, medium, large",
+          "type": "string",
+          "required": false,
+          "default": "base"
+        },
+        {
+          "name": "hf-token",
+          "description": "HuggingFace token（用于说话人分离，也可通过 HF_TOKEN 环境变量或 skill 目录下的 .env 文件设置）",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "device",
+          "description": "运行设备：cpu, cuda",
+          "type": "string",
+          "required": false,
+          "default": "cpu"
+        }
+      ]
+    },
+    {
+      "name": "识别发言人",
+      "description": "提取视频语音并识别不同说话人（等同于 /whisperx）",
+      "handler": "main.py",
+      "arguments": [
+        {
+          "name": "video",
+          "description": "视频文件路径",
+          "type": "file",
+          "required": true
+        },
+        {
+          "name": "format",
+          "description": "输出格式：txt（默认）、srt、json、all",
+          "type": "string",
+          "required": false,
+          "default": "txt",
+          "options": ["txt", "srt", "json", "all"]
+        },
+        {
+          "name": "model",
+          "description": "Whisper 模型：tiny, base, small, medium, large",
+          "type": "string",
+          "required": false,
+          "default": "base"
+        },
+        {
+          "name": "hf-token",
+          "description": "HuggingFace token（也可通过 HF_TOKEN 环境变量或 skill 目录下的 .env 文件设置）",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "device",
+          "description": "运行设备：cpu, cuda",
+          "type": "string",
+          "required": false,
+          "default": "cpu"
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    "faster-whisper",
+    "pyannote.audio",
+    "scipy",
+    "torch",
+    "ffmpeg"
+  ],
+  "dependencies": {
+    "python": ">=3.8"
+  }
+}
