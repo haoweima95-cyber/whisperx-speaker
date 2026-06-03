@@ -93,6 +93,7 @@ REQUIRED_PIP_PACKAGES = {
     "pyannote.audio": "pyannote.audio",
     "scipy": "scipy",
     "pypinyin": "pypinyin",
+    "zhconv": "zhconv",
 }
 
 
@@ -316,7 +317,7 @@ def extract_title_from_filename(video_path):
     text = re.sub(r'\s+', ' ', text).strip()
 
     # Step 7: 提取最长的中文连续片段
-    chinese_parts = re.findall(r'[一-鿿，。！？、；：""''《》　\.,!?;:]+', text)
+    chinese_parts = re.findall(r'[一-鿿，。！？、；：""''《》　.,!?;:]+', text)
     if chinese_parts:
         title = max(chinese_parts, key=len).strip()
         # 清理首尾标点
@@ -479,6 +480,31 @@ def _pinyin_similarity(py1, py2):
     dist = prev[n]
     max_len = max(m, n)
     return 1.0 - (dist / max_len)
+
+
+# ============================================================
+# 繁简转换
+# ============================================================
+
+def simplify_chinese(segments):
+    """将转录结果中的繁体字转为简体字（基于 zhconv）"""
+    try:
+        from zhconv import convert
+    except ImportError:
+        print("⚠️ zhconv 未安装，跳过繁简转换")
+        return segments
+
+    converted = 0
+    for seg in segments:
+        original = seg["text"]
+        simplified = convert(original, "zh-cn")
+        if simplified != original:
+            seg["text"] = simplified
+            converted += 1
+
+    if converted > 0:
+        print(f"🔄 繁简转换: {converted} 处修正")
+    return segments
 
 
 # ============================================================
@@ -681,6 +707,9 @@ def process_video(video_path, output_format="txt", model_size="base", device="cp
     # 6b. 上下文纠错（基于文件名关键词）
     if correct_errors:
         segments = phonetic_correct(segments, video_path)
+
+    # 6c. 繁简转换
+    segments = simplify_chinese(segments)
 
     # 7. 说话人分离
     if hf_token:
