@@ -92,6 +92,7 @@ REQUIRED_PIP_PACKAGES = {
     "faster_whisper": "faster-whisper",
     "pyannote.audio": "pyannote.audio",
     "scipy": "scipy",
+    "pypinyin": "pypinyin",
 }
 
 
@@ -168,13 +169,11 @@ ffmpeg 用于从视频中提取音频，需要单独安装：
 # ============================================================
 
 def format_time_txt(seconds):
-    """TXT 格式：MM:SS 或 HH:MM:SS"""
+    """TXT 格式：HH:MM:SS"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
-    if hours > 0:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def format_time_srt(seconds):
@@ -256,6 +255,168 @@ def transcribe(audio_path, model_size="base", device="cpu"):
 
     print(f"  共 {len(segments)} 个语音片段")
     return segments
+
+
+# ============================================================
+# 上下文纠错（基于文件名关键词 + 拼音相似度）
+# ============================================================
+
+def extract_keywords_from_filename(video_path):
+    """
+    从视频文件名中提取有意义的中文关键词（>= 2 个汉字）
+    用于后续的语音转写纠错
+    """
+    import re
+
+    filename = Path(video_path).stem
+
+    # 移除常见的噪音标记
+    # 去掉括号及其内容、下划线、数字、英文、特殊符号
+    cleaned = re.sub(r'[\(（\[【].*?[\)）\]】]', ' ', filename)  # 括号内容
+    cleaned = re.sub(r'_[a-f0-9]{8,}', ' ', cleaned)            # 文件hash
+    cleaned = re.sub(r'[a-zA-Z0-9]+', ' ', cleaned)              # 英文数字
+    cleaned = re.sub(r'[#＃@＠\-\—\.\,\，\。\!\！\?\？]', ' ', cleaned)  # 标点
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    # 提取连续中文片段
+    keywords = []
+    for phrase in re.findall(r'[一-鿿]{2,}', cleaned):
+        phrase = phrase.strip()
+        if len(phrase) >= 2:
+            keywords.append(phrase)
+
+    # 对长度 >= 4 的关键词，也拆出 2-3 字子串作为额外参考
+    extra = []
+    for kw in keywords:
+        if len(kw) >= 4:
+            for i in range(len(kw) - 3):
+                extra.append(kw[i:i+4])
+            for i in range(len(kw) - 2):
+                extra.append(kw[i:i+3])
+    keywords.extend(extra)
+
+    # 去重，按长度降序（优先匹配长词）
+    seen = set()
+    result = []
+    for kw in sorted(set(keywords), key=len, reverse=True):
+        if kw not in seen:
+            seen.add(kw)
+            result.append(kw)
+
+    return result
+
+
+def get_pinyin(text):
+    """获取中文文本的拼音（无声调），失败返回原文本"""
+    try:
+        from pypinyin import lazy_pinyin, Style
+        return ''.join(lazy_pinyin(text, style=Style.NORMAL, errors='ignore'))
+    except Exception:
+        return text
+
+
+def phonetic_correct(segments, video_path):
+    """
+    基于文件名关键词 + 拼音相似度进行上下文纠错
+
+    逻辑：
+    1. 从视频文件名提取关键词
+    2. 如果某个关键词没有在转录结果中出现，但存在拼音相似的短语
+       则将其替换为正确的关键词
+    """
+    keywords = extract_keywords_from_filename(video_path)
+    if not keywords:
+        return segments
+
+    # 把所有转录文本拼接，方便跨片段搜索
+    text_parts = [(seg["text"], i) for i, seg in enumerate(segments)]
+    full_text = ''.join(t[0] for t in text_parts)
+
+    corrections = {}  # (old_text, start_pos) -> new_text
+
+    for keyword in keywords:
+        if len(keyword) < 2:
+            continue
+
+        # 如果关键词已存在于转录中，跳过
+        if keyword in full_text:
+            continue
+
+        kw_pinyin = get_pinyin(keyword)
+        kw_len = len(keyword)
+
+        # 在全文滑动窗口搜索拼音相似的短语
+        best_match = None
+        best_score = 0.0
+
+        for i in range(len(full_text) - kw_len + 1):
+            candidate = full_text[i:i + kw_len]
+            # 跳过已包含关键词的情况
+            if candidate == keyword:
+                continue
+            # 只检查全中文窗口
+            if not all('一' <= c <= '鿿' for c in candidate):
+                continue
+
+            cand_pinyin = get_pinyin(candidate)
+
+            # 计算拼音相似度
+            score = _pinyin_similarity(kw_pinyin, cand_pinyin)
+
+            # 需要拼音高度相似但字符不同（才可能是错误）
+            if score >= 0.9 and score > best_score and candidate != keyword:
+                # 只有当候选不是已存在的正确关键词时才替换
+                if candidate not in keywords:
+                    best_score = score
+                    best_match = candidate
+
+        if best_match:
+            corrections[best_match] = keyword
+
+    if not corrections:
+        return segments
+
+    # 应用纠错
+    print(f"\n🔧 上下文纠错: {len(corrections)} 处")
+    for wrong, correct in corrections.items():
+        print(f"  「{wrong}」 → 「{correct}」")
+
+    for seg in segments:
+        text = seg["text"]
+        for wrong, correct in corrections.items():
+            text = text.replace(wrong, correct)
+        seg["text"] = text
+
+    return segments
+
+
+def _pinyin_similarity(py1, py2):
+    """
+    计算两个拼音字符串的相似度 (0.0 ~ 1.0)
+    使用编辑距离归一化
+    """
+    if py1 == py2:
+        return 1.0
+    if not py1 or not py2:
+        return 0.0
+
+    # 编辑距离
+    m, n = len(py1), len(py2)
+    if m == 0 or n == 0:
+        return 0.0
+
+    # 优化：只计算一次 DP
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        curr = [i] + [0] * n
+        for j in range(1, n + 1):
+            cost = 0 if py1[i-1] == py2[j-1] else 1
+            curr[j] = min(curr[j-1] + 1, prev[j] + 1, prev[j-1] + cost)
+        prev = curr
+
+    dist = prev[n]
+    max_len = max(m, n)
+    return 1.0 - (dist / max_len)
 
 
 # ============================================================
@@ -390,7 +551,7 @@ def save_json_output(merged_segments, output_path):
 # 主处理流程
 # ============================================================
 
-def process_video(video_path, output_format="txt", model_size="base", device="cpu", hf_token=None):
+def process_video(video_path, output_format="txt", model_size="base", device="cpu", hf_token=None, correct_errors=True):
     """处理视频：提取音频 -> 转录 -> 说话人分离 -> 合并 -> 输出"""
 
     # 1. 自动安装依赖
@@ -436,6 +597,10 @@ def process_video(video_path, output_format="txt", model_size="base", device="cp
         print("❌ 未检测到语音内容")
         cleanup_temp(wav_path)
         return None
+
+    # 6b. 上下文纠错（基于文件名关键词）
+    if correct_errors:
+        segments = phonetic_correct(segments, video_path)
 
     # 7. 说话人分离
     if hf_token:
@@ -535,6 +700,8 @@ def main():
                         help="保存 token 到本地 .env 文件")
     parser.add_argument("--guide", action="store_true",
                         help="显示 HuggingFace Token 获取指南")
+    parser.add_argument("--no-correct", action="store_true",
+                        help="禁用基于文件名关键词的上下文纠错")
 
     args = parser.parse_args()
 
@@ -559,6 +726,7 @@ def main():
         model_size=args.model,
         device=args.device,
         hf_token=args.hf_token,
+        correct_errors=not args.no_correct,
     )
 
     if result:
