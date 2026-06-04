@@ -310,6 +310,9 @@ def extract_title_from_filename(video_path):
     text = re.sub(r'\.{3,}$', '', text)
     text = re.sub(r'…+$', '', text)
 
+    # 保存去噪后的文本（含英文），作为中文提取失败的兜底
+    cleaned_with_english = re.sub(r'\s+', ' ', text).strip()
+
     # Step 5: 去除残留的英文单词、数字和特殊符号
     text = re.sub(r'[a-zA-Z0-9@＠#＃\-\—]+', ' ', text)
 
@@ -326,8 +329,8 @@ def extract_title_from_filename(video_path):
         if title:
             return title
 
-    # 兜底：返回清理后的文本或原始文件名
-    fallback = text.strip().rstrip('._-')
+    # 兜底：优先用去噪后的文本（含英文），其次用原始文件名
+    fallback = cleaned_with_english.strip().rstrip('._-')
     return fallback if fallback else Path(video_path).stem
 
 
